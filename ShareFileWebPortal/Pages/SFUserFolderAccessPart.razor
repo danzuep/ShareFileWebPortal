@@ -1,0 +1,223 @@
+﻿@page "/sf-user-folder-access-part"
+
+<PageTitle>ShareFile User Folder Access</PageTitle>
+
+@using System.Diagnostics
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using Microsoft.EntityFrameworkCore
+@using AutoMapper
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using Common.Helpers
+@using Common.Helpers.IO
+@using global::Data.ShareFile
+@using global::Data.ShareFile.Models
+@using global::Data.ShareFile.DbFirstModels
+@using ShareFile.Api.Helpers.Extensions
+@using ShareFile.Api.Helpers.Models
+
+@implements IDisposable
+@inject ILogger<SFUserFolderAccessPart> _logger
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject IMapper _mapper
+@inject IJSRuntime JS
+
+<h3>Select User</h3>
+
+@if (VmUsers == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    @*<label>Email:
+        <input @bind="SearchString" @bind:event="oninput" @onkeydown="@Enter" />
+        <button @onclick="RefreshVmUsers">Search</button> (split on '&' then on '|')
+    </label>
+    <div>@VmUsers.Count filtered "@FilterString" users loaded from the database.
+        <button @onclick="GetUsersFromApi">Refresh all users from the API</button>
+        @if (IsUpdatingUsersFromApi)
+        {
+            <button @onclick="Cancel">Stop the API call</button>
+            <p>Updating all users from the API...</p>
+        }
+    </div>*@
+    
+   @*<select @onchange="@OnSelectionChanged">
+        <option value="">-- User Selection --</option>
+        @foreach (var user in VmUsers)
+        {
+            <option value="@user.Uid"> @user.Name &lt;@user.Email&gt; </option>
+        }
+    </select>*@
+    
+    <RadzenDropDown Data=@VmUsers TextProperty="Name" ValueProperty="Uid" TValue="SfPrincipalVM" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowClear="true" AllowFiltering="true" Placeholder="Select a user..." Change=@(args => UserSelectionChanged(args))/>
+        
+    <RadzenDropDown Data=@VmGroups TextProperty="Name" ValueProperty="Uid" TValue="ShareFileGroupVM" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowClear="true" AllowFiltering="true" Placeholder="Select a group..." Change=@(args => GroupSelectionChanged(args))/>
+
+    @if (!string.IsNullOrEmpty(@_selectedUid))
+    {
+        <label class="user-label">(@_selectedUid)</label>
+    }
+
+    <div class="border-primary my-1 p-1">
+        <ErrorBoundary>
+            <ChildContent>
+                <SFFolderAccess UserUid="@_selectedUid"/> @* @bind-GroupMembership="GroupMembership"*@
+            </ChildContent>
+            <ErrorContent>
+                <p>ShareFile Folder Access is not available at the moment, please try again later.</p>
+            </ErrorContent>
+        </ErrorBoundary>
+    </div>
+}
+
+@code {
+    private string SearchString { get; set; } = "";
+    private string? FilterString { get; set; }
+    //private string? GroupMembership { get; set; }
+    private bool IsUpdatingUsersFromApi = false;
+    private string? _selectedUid;
+
+    private CancellationTokenSource cts = new CancellationTokenSource();
+    private IEnumerable<DbPrincipal>? _dbSfUsers;
+    protected ICollection<SfPrincipalVM>? VmUsers { get; set; }
+    private IEnumerable<ShareFileDbGroup>? _dbSfGroups;
+    protected ICollection<ShareFileGroupVM>? VmGroups { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logger.LogDebug("Loading users from DB...");
+        _dbSfUsers = await _db.GetShareFilePrincipals(cts.Token);
+        RefreshVmUsers();
+        _dbSfGroups = await _db.GetRepoShareFileGroups(cts.Token);
+        VmGroups = _mapper.Map<IList<ShareFileGroupVM>>(_dbSfGroups);
+        _logger.LogDebug("{0} groups loaded", VmGroups.Count);
+    }
+
+    private IEnumerable<DbPrincipal>? FilterUsers()
+    {
+        FilterString = $"{SearchString}";
+        IEnumerable<DbPrincipal>? result = null;
+        if (_dbSfUsers != null)
+        {
+            _logger.LogDebug("Applying '{0}' filter to {1}", FilterString, _dbSfUsers.Count());
+            var filters = SearchString?.Split('&') ?? Array.Empty<string>();
+            var andFilters = filters.Where(f => !f.Contains('|'));
+            var orFilters = filters.Where(f => f.Contains('|')).SelectMany(f => f.Split('|'));
+            result = _dbSfUsers;
+            if (andFilters.Any())
+                result = result.Where(u => andFilters.All(a => u.Email.Contains(a,
+                    char.IsUpper(a.FirstOrDefault()) ? StringComparison.CurrentCulture : StringComparison.OrdinalIgnoreCase)));
+            if (orFilters.Any())
+                result = result.Where(u => orFilters.Any(o => u.Email.Contains(o,
+                    char.IsUpper(o.FirstOrDefault()) ? StringComparison.CurrentCulture : StringComparison.OrdinalIgnoreCase)));
+        }
+        return result;
+    }
+
+    private void RefreshVmUsers()
+    {
+        var filtered = FilterUsers();
+        if (filtered != null)
+        {
+            VmUsers = _mapper.Map<IList<SfPrincipalVM>>(filtered);
+            _logger.LogDebug("{0} users loaded", VmUsers.Count);
+        }
+    }
+
+    public void Enter(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            RefreshVmUsers();
+    }
+
+    private async Task GetUsersFromApi()
+    {
+        _logger.LogDebug("Loading values from API...");
+        IsUpdatingUsersFromApi = true;
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+        var apiValues = await _sfService.GetShareFileApiContactsAsync(cts.Token);
+        _logger.LogInformation("{0} shared contacts loaded in {1}", apiValues.count, stopwatch.Elapsed.ToLongTimeString());
+        stopwatch.Restart();
+        _dbSfUsers = _mapper.Map<IEnumerable<DbPrincipal>>(apiValues.GetValues());
+        RefreshVmUsers();
+        StateHasChanged(); // update the view before the next await
+        //const int updateLimit = 10000;
+        //_logger.LogDebug("Saving max of {0} to the database (This takes approximately 57 seconds as it checks for an existing record before adding a new one)...", updateLimit);
+        //int countUpdated = await _db.SetSfAsync(_dbSfUsers, updateLimit);
+        _logger.LogDebug("Adding values to the database...");
+        int countUpdated = await _db.AddOverwriteAsync(_dbSfUsers);
+        stopwatch.Stop();
+        _logger.LogInformation("{0} database records updated in {1}", countUpdated, stopwatch.Elapsed.ToLongTimeString());
+    }
+    
+    //private async Task GetGroupsFromApi()
+    //{
+    //    _logger.LogDebug("Loading values from API...");
+    //    IsUpdatingUsersFromApi = true;
+    //    var stopwatch = new Stopwatch();
+    //    stopwatch.Start();
+    //    var apiValues = await _sfService.GetGroupsAsync(cts.Token);
+    //    _logger.LogInformation("{0} shared groups loaded in {1}", apiValues.Count(), stopwatch.Elapsed.ToLongTimeString());
+    //    stopwatch.Restart();
+    //    _dbSfUsers = _mapper.Map<IEnumerable<DbPrincipal>>(apiValues);
+    //    RefreshVmUsers();
+    //    StateHasChanged(); // update the view before the next await
+    //    //const int updateLimit = 10000;
+    //    //_logger.LogDebug("Saving max of {0} to the database (This takes approximately 57 seconds as it checks for an existing record before adding a new one)...", updateLimit);
+    //    //int countUpdated = await _db.SetSfAsync(_dbSfUsers, updateLimit);
+    //    _logger.LogDebug("Adding values to the database...");
+    //    int countUpdated = await _db.AddOverwriteAsync(_dbSfUsers);
+    //    stopwatch.Stop();
+    //    _logger.LogInformation("{0} database records updated in {1}", countUpdated, stopwatch.Elapsed.ToLongTimeString());
+    //}
+
+    private void OnSelectionChanged(ChangeEventArgs e) => UserSelectionChanged(e.Value);
+
+    private void OnSfPrincipalVMChanged(object e)
+    {
+        if (e is SfPrincipalVM selectedUser)
+            UserSelectionChanged(selectedUser.Name);
+    }
+    
+    private void UserSelectionChanged(object? selectedValue)
+    {
+        if (selectedValue is string selectedUid)
+        {
+            _selectedUid = selectedUid;
+            var user = VmUsers?.Where(u => u.Uid == selectedUid).FirstOrDefault();
+            _logger.LogDebug($"{user?.Name} <{user?.Email}> ({selectedUid}) selected");
+        }
+    }
+    
+    private void GroupSelectionChanged(object? selectedValue)
+    {
+        if (selectedValue is string selectedUid)
+        {
+            _selectedUid = selectedUid;
+            var group = VmGroups?.Where(u => u.Uid == selectedUid).FirstOrDefault();
+            _logger.LogDebug($"{group?.Name} ({selectedUid}) selected");
+        }
+    }
+
+    public void Cancel()
+    {
+        _logger.LogDebug("API calls cancelled");
+        cts?.Cancel();
+        if (!cts?.TryReset() ?? false)
+            cts = new CancellationTokenSource();
+    }
+
+    public void Dispose()
+    {
+        Cancel();
+        cts?.Dispose();
+    }
+}

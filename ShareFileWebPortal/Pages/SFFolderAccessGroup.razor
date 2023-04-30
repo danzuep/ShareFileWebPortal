@@ -1,0 +1,73 @@
+﻿@page "/sf-folder-access-group"
+
+<PageTitle>ShareFile Group Folder Access</PageTitle>
+
+@using System.Diagnostics
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using Microsoft.EntityFrameworkCore
+@using Common.Helpers
+@using Common.Helpers.IO
+@using global::Data.ShareFile.DbFirstModels
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using global::Data.ShareFile
+@using global::Data.ShareFile.Models
+@using AutoMapper
+@using ShareFile.Api.Helpers.Extensions
+@using ShareFile.Api.Helpers.Models
+
+@inject ILogger<SFFolderAccessUser> _logger
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject IMapper _mapper
+@inject IJSRuntime JS
+
+<h4>Select Group</h4>
+
+@if (VmGroups == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <RadzenDropDown Data=@VmGroups TextProperty="Name" ValueProperty="Uid" TValue="ShareFileGroupVM" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowClear="true" AllowFiltering="true" Placeholder="Select a group..." Change=@(args => GroupSelectionChanged(args))/>
+
+    <div class="border-primary my-1 p-1">
+        <ErrorBoundary>
+            <ChildContent>
+                <SFFolderAccessG Group="@_group"/>
+            </ChildContent>
+            <ErrorContent>
+                <p>ShareFile Folder Access is not available at the moment, please try again later.</p>
+            </ErrorContent>
+        </ErrorBoundary>
+    </div>
+}
+
+@code {
+    private ShareFileGroupVM? _group;
+
+    private CancellationTokenSource cts = new CancellationTokenSource();
+    private IEnumerable<ShareFileDbGroup>? _dbSfGroups;
+    protected IEnumerable<ShareFileGroupVM>? VmGroups { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logger.LogDebug("Loading users from DB...");
+        _dbSfGroups = await _db.GetFilteredShareFileGroups(cts.Token);
+        VmGroups = _mapper.Map<IEnumerable<ShareFileGroupVM>>(_dbSfGroups);
+        _logger.LogDebug("{0} groups loaded", VmGroups.Count());
+    }
+
+    private void GroupSelectionChanged(object? selectedValue)
+    {
+        if (selectedValue is string selectedUid)
+        {
+            _group = VmGroups?.Where(u => u.Uid == selectedUid).FirstOrDefault();
+            _logger.LogDebug("{0} ({1}) {2} selected", _group?.Name, _group?.Members?.Count, selectedUid);
+        }
+    }
+}

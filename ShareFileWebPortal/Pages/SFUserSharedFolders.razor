@@ -1,0 +1,280 @@
+﻿@page "/sf-user-shared-folders"
+
+<PageTitle>ShareFile User Shared Folder Access</PageTitle>
+
+@using System.Diagnostics
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using Microsoft.EntityFrameworkCore
+@using AutoMapper
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using Common.Helpers
+@using Common.Helpers.IO
+@using global::Data.ShareFile
+@using global::Data.ShareFile.Models
+@using global::Data.ShareFile.DbFirstModels
+@using ShareFile.Api.Helpers.Extensions
+@using ShareFile.Api.Helpers.Models
+
+@implements IDisposable
+@inject ILogger<SFUserSharedFolders> _logger
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject IMapper _mapper
+
+<h3>Select User</h3>
+
+@if (VmUsers == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <div><label>Email:
+        <input @bind="SearchString" @bind:event="oninput" @onkeydown="@Enter" />
+        <button @onclick="RefreshVmUsers">Search</button> (split on '&' then on '|')
+    </label></div>
+
+    <div>@VmUsers.Count filtered "@FilterString" users loaded from the database.
+        <button @onclick="GetUsersFromApi">Refresh all users from the API</button>
+        @if (IsUpdatingUsersFromApi)
+        {
+            <p>Updating all users from the API...</p>
+        }
+        <button @onclick="Cancel">Stop the API call</button>
+        @if (IsUpdatingFoldersFromApi)
+        {
+            <p>Updating shared folders from the API...</p>
+        }
+    </div>
+    
+    <select @onchange="@SelectionChanged">
+        <option value="">-- User Selection --</option>
+        @foreach (var user in VmUsers)
+        {
+            <option value="@user.Uid"> @user.Name &lt;@user.Email&gt; </option>
+        }
+    </select>
+    @if (!string.IsNullOrEmpty(@_selectedUid) && _selectedUser != null)
+    {
+        <label class="user-label">(@_selectedUser.Uid)</label>
+    }
+}
+
+<br />
+
+<br />
+
+@if (VmFolders == null)
+{
+    @if (!IsAuthorizationFailed)
+    {
+        <p><em>Waiting for user selection.</em></p>
+    }
+    else
+    {
+        <p>Authorization failed, you do not have permission to view the selected user's access.</p>
+    }
+}
+else
+{
+    <p>@VmFolders.Count (of @_dbSfItems?.Count()) folders loaded from the database.
+        <button @onclick="ExportToExcel">Export to Excel</button>
+        @if (!string.IsNullOrEmpty(filePath))
+        {
+            <p>User folder access report exported to "@filePath"</p>
+        }
+    </p>
+
+    <h4>ShareFile Shared Folder Access</h4>
+    
+    <table class="table">
+        <thead>
+            <tr>
+                <th>GUID</th>
+                <th>Folder</th>
+                <th>Access</th>
+                <th>Items</th>
+                <th>Size</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var folder in VmFolders)
+            {
+                <tr>
+                    <td>@folder.Uid</td>
+                    <td>@folder.FullPath</td>
+                    <td>@AccessType</td>
+                    <td>@folder.ItemCount</td>
+                    <td>@folder.FileSize</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private string? SearchString { get; set; } = "";
+    private string? FilterString { get; set; }
+    private string? GroupMembership { get; set; }
+    private string? AccessType => string.IsNullOrEmpty(GroupMembership) ? "User" : "Group";
+    private bool IsUpdatingUsersFromApi = false;
+    private bool IsUpdatingFoldersFromApi = false;
+    private bool IsAuthorizationFailed = false;
+    private string _filePath = @"C:\Temp\ShareFile";
+    private string? filePath;
+    private string? _selectedUid;
+    private DbPrincipal? _selectedUser;
+
+    private CancellationTokenSource cts = new CancellationTokenSource();
+    private IEnumerable<DbPrincipal>? _dbSfUsers;
+    private IEnumerable<SfAccessControl>? _dbSfAccessControls;
+    private IEnumerable<SfItem>? _dbSfItems;
+    protected ICollection<SfItemVM>? VmFolders;
+    protected ICollection<SfPrincipalVM>? VmUsers { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logger.LogDebug("Loading users from DB...");
+        _dbSfUsers = await _db.GetShareFilePrincipals(cts.Token);
+        RefreshVmUsers();
+    }
+
+    private IEnumerable<DbPrincipal>? FilterUsers()
+    {
+        FilterString = $"{SearchString}";
+        IEnumerable<DbPrincipal>? result = null;
+        if (_dbSfUsers != null)
+        {
+            _logger.LogDebug("Applying '{0}' filter to {1}", FilterString, _dbSfUsers.Count());
+            var filters = SearchString?.Split('&') ?? Array.Empty<string>();
+            var andFilters = filters.Where(f => !f.Contains('|'));
+            var orFilters = filters.Where(f => f.Contains('|')).SelectMany(f => f.Split('|'));
+            result = _dbSfUsers;
+            if (andFilters.Any())
+                result = result.Where(u => andFilters.All(a => u.Email.Contains(a,
+                    char.IsUpper(a.FirstOrDefault()) ? StringComparison.CurrentCulture : StringComparison.OrdinalIgnoreCase)));
+            if (orFilters.Any())
+                result = result.Where(u => orFilters.Any(o => u.Email.Contains(o,
+                    char.IsUpper(o.FirstOrDefault()) ? StringComparison.CurrentCulture : StringComparison.OrdinalIgnoreCase)));
+        }
+        return result;
+    }
+
+    private void RefreshVmUsers()
+    {
+        var filtered = FilterUsers();
+        if (filtered != null)
+        {
+            VmUsers = _mapper.Map<ICollection<SfPrincipalVM>>(filtered);
+            _logger.LogDebug("{0} loaded: {1}", VmUsers.Count, string.Join("\r\n", VmUsers.Select(a => $"{a.Name} <{a.Email}>")));
+        }
+    }
+
+    public void Enter(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            RefreshVmUsers();
+    }
+
+    private async Task GetUsersFromApi()
+    {
+        _logger.LogDebug("Loading values from API...");
+        IsUpdatingUsersFromApi = true;
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+        var apiValues = await _sfService.GetShareFileApiContactsAsync(cts.Token);
+        _logger.LogInformation("{0} shared contacts loaded in {1}", apiValues.count, stopwatch.Elapsed.ToLongTimeString());
+        stopwatch.Restart();
+        _dbSfUsers = _mapper.Map<IEnumerable<DbPrincipal>>(apiValues.GetValues());
+        RefreshVmUsers();
+        StateHasChanged(); // update the view before the next await
+        _logger.LogDebug("Adding values to the database...");
+        int countUpdated = await _db.AddOverwriteAsync(_dbSfUsers);
+        stopwatch.Stop();
+        _logger.LogInformation("{0} database records updated in {1}", countUpdated, stopwatch.Elapsed.ToLongTimeString());
+    }
+
+    private async Task SelectionChanged(ChangeEventArgs e)
+    {
+        if (e.Value is string selectedUid)
+        {
+            IsAuthorizationFailed = false;
+            filePath = null;
+            _selectedUid = selectedUid;
+            _selectedUser = _dbSfUsers?.Where(u => u.Uid == _selectedUid).FirstOrDefault();
+            _logger.LogDebug($"GUID {_selectedUid} selected");
+            await GetFoldersFromApi(_selectedUid);
+        }
+    }
+    
+    private void RefreshVmFolders(IEnumerable<SfItem>? sfItems, int pageCount = 1000)
+    {
+        if (sfItems != null)
+        {
+            VmFolders = _mapper.Map<ICollection<SfItemVM>>(sfItems.Take(1000));
+            _logger.LogDebug("{0} of {1} folders loaded", VmFolders.Count, sfItems.Count());
+            StateHasChanged(); // update the view before the next await
+        }
+    }
+
+    private async Task GetFoldersFromApi(string userUid)
+    {
+        if (!string.IsNullOrWhiteSpace(userUid))
+        {
+            _logger.LogDebug("Loading values from API...");
+            IsUpdatingFoldersFromApi = true;
+            filePath = null;
+            int countUpdated = 0;
+            var stopwatch = new Stopwatch();
+            stopwatch.Start();
+            try
+            {
+                var apiValues = await _sfService.GetAllSharedFoldersForSpecificUserAsync(userUid, cts.Token);
+                _logger.LogInformation("API values loaded in {0}", stopwatch.Elapsed.ToLongTimeString());
+                stopwatch.Restart();
+                var sfItems = _mapper.Map<IEnumerable<SfItem>>(apiValues);
+                RefreshVmFolders(sfItems);
+                _logger.LogDebug("Adding values to the database...");
+                countUpdated = await _db.AddOverwriteAsync(sfItems);
+                var folderAccess = apiValues.SelectMany(f => f.AccessControls);
+                _dbSfAccessControls = _mapper.Map<IEnumerable<SfAccessControl>>(folderAccess);
+                countUpdated += await _db.AddOverwriteAsync(_dbSfAccessControls);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to get all shared folders for user '{0}'", userUid);
+                IsAuthorizationFailed = true;
+            }
+            stopwatch.Stop();
+            _logger.LogInformation("{0} database records updated in {1}", countUpdated, stopwatch.Elapsed.ToLongTimeString());
+            IsUpdatingFoldersFromApi = false;
+        }
+    }
+
+    public void ExportToExcel()
+    {
+        if (_dbSfItems.IsNotNullOrEmpty())
+        {
+            var access = _mapper.Map<IList<SFUserItemSecurity>>(_dbSfItems);
+            access.ActionEach(a => a.PrincipalUid = _selectedUid);
+            filePath = access.WriteToExcel(_filePath, "User folder access report", 1, 2, 5);
+        }
+    }
+
+    public void Cancel()
+    {
+        _logger.LogDebug("API calls cancelled");
+        cts?.Cancel();
+        if (!cts?.TryReset() ?? false)
+            cts = new CancellationTokenSource();
+    }
+
+    public void Dispose()
+    {
+        Cancel();
+        cts?.Dispose();
+    }
+}

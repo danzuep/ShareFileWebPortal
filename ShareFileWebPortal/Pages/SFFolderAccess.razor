@@ -1,0 +1,431 @@
+﻿@page "/sf-folder-access"
+
+<PageTitle>ShareFile Folder Access</PageTitle>
+
+@using System.Diagnostics
+@using System.Linq.Dynamic.Core
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.Extensions.Options
+@using Common.Helpers
+@using Common.Helpers.IO
+@using ShareFileWebPortal.Models
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using global::Data.ShareFile
+@using global::Data.ShareFile.DbFirstModels
+@using global::Data.ShareFile.Models
+@using AutoMapper
+@using ShareFile.Api.Helpers.Extensions
+@using ShareFile.Api.Helpers.Models
+
+@implements IDisposable
+@inject ILogger<SFFolderAccess> _logger
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject IOptions<AppsettingsOptions> _options
+@inject IMapper _mapper
+@inject IJSRuntime JS
+
+@if (VmFolders == null)
+{
+    @if (string.IsNullOrEmpty(UserUid))
+    {
+        <p><em>Waiting for user selection.</em></p>
+    }
+    else
+    {
+        <p><em>Loading ShareFile folder access for the selected user...</em></p>
+    }
+}
+else
+{
+    @*@if (!string.IsNullOrEmpty(@GroupMembership))
+    {
+        <p>User is part of the following groups: @GroupMembership</p>
+    }*@
+    @*@if (_user != null)
+    {
+        <p>User GUID: @_user.Uid</p>
+    }*@
+    @if (!string.IsNullOrEmpty(UserUid))
+    {
+        <p>User GUID: @UserUid</p>
+    }
+    @if (GroupMembership != null)
+    {
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Group Name</th>
+                    <th>Group GUID</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var item in GroupMembership)
+                {
+                    <tr>
+                        <td>@item.Name</td>
+                        <td>@item.Uid</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    @*<div>
+        <label>
+            <p><button @onclick="GetFoldersFromApi">Refresh folders from the API</button>
+                Folder Depth: <input @bind="FolderRecursionLimit" @bind:event="oninput" @onkeydown="@EnterGetApiFolders" /> (-1 for unlimited recursion)
+                @if (VmFolders != null)
+                {
+                    <button class="btn btn-primary" @onclick="ExportToExcel" disabled=@isExporting>Export All</button>
+                }
+            </p>
+            @if (IsUpdatingFoldersFromApi)
+            {
+                <p><button @onclick="Cancel">Stop the API call</button>
+                    Updating folders from the API... This can take a LONG time (~2 hours)</p>
+            }
+            <p>Folder to process: <input @bind="FolderToProcess" @bind:event="oninput" @onkeydown="@EnterGetApiFolders" /> (folder name)</p>
+            <p>Folder(s) to skip: <input @bind="FolderToSkip" @bind:event="oninput" @onkeydown="@EnterGetApiFolders" /> (folder name)</p>
+        </label>
+    </div>*@
+    @if (VmFolders != null)
+    {
+        <p>@ItemCountTotal.ToString("n0") items loaded from the database.
+            <button class="btn btn-primary" @onclick="ExportToExcel" disabled=@isExporting>Export All</button></p>
+    }
+    <br />
+
+    <h4>ShareFile Folder Access</h4>
+    
+    @*<p>Displaying <b>@PageCount</b> folders from <b>@CurrentPageStart</b> to <b>@CurrentPageEnd</b> of <b>@TotalCount</b></p>*@
+    <RadzenDataGrid @ref=itemsGrid Count="@ItemCountTotal" Data="@VmFolders" TItem="SfItemVM" IsLoading="@isLoading" LoadData="@OnPageChanged" AllowSorting="true" AllowColumnResize="true" AllowColumnReorder="true"
+        AllowFiltering="true" FilterMode="FilterMode.Advanced" LogicalFilterOperator="LogicalFilterOperator.Or" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowPaging="true" PageSize="@PageSize" PagerPosition="PagerPosition.Bottom" PagerHorizontalAlign="HorizontalAlign.Left" ShowPagingSummary="true">
+        <GroupHeaderTemplate>
+            @context.GroupDescriptor.GetTitle(): @(context.Data.Key ?? "") (@context.Data.Count)
+        </GroupHeaderTemplate>
+        <Columns>
+          @*<RadzenDataGridColumn TItem="SfItemVM" Title="#" Width="50px" Sortable="false" Filterable="false" Reorderable="false" TextAlign="TextAlign.Center">
+                <Template>@GetRowCount(context)</Template>
+            </RadzenDataGridColumn>*@
+            <RadzenDataGridColumn TItem="SfItemVM" Property="Uid" Title="GUID" Visible="false" Filterable="false" Sortable="false" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="FullPath" Title="Folder">
+               <FooterTemplate>
+                    Displaying <b>@PageCount</b> folders from <b>@CurrentPageStart</b> to <b>@CurrentPageEnd</b> of <b>@ItemCountTotal</b>
+                </FooterTemplate>
+            </RadzenDataGridColumn>
+            <RadzenDataGridColumn TItem="SfItemVM" Property="AccessName" Title="Name" Width="150px" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="AccessType" Title="Access" Width="130px"
+                Type="typeof(IEnumerable<string>)" FilterValue="@selectedAccess" FilterOperator="FilterOperator.Contains">
+                <FilterTemplate>
+                    <RadzenDropDown @bind-Value=@selectedAccess Style="width:100%"
+                        Change=@OnSelectedAccessChange Data="@accessTypes" AllowClear="true" Multiple="true" />
+                </FilterTemplate>
+            </RadzenDataGridColumn>
+            <RadzenDataGridColumn TItem="SfItemVM" Property="ItemCount" Title="Items" Width="110px" FormatString="{0:n0}" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="FileSize" Title="Size" Width="100px" />
+        </Columns>
+    </RadzenDataGrid>
+}
+
+@code {
+    private int PageSize = 30;
+    private RadzenDataGrid<SfItemVM>? itemsGrid;
+    private IList<string> accessTypes = new List<string> { "User", "Group" };
+    private IEnumerable<string>? selectedAccess;
+    protected IEnumerable<SfItemVM>? VmFolders;
+    private bool isLoading = false;
+    private bool isRendering = false;
+    //private int GetRowCount(SfItemVM? context) =>
+    //    context != null && VmFolders != null ?
+    //    //VmFolders.IndexOf(context) + 1 : 0;
+    //    CurrentPageStart + VmFolders.IndexOf(context) : 0;
+    private int TotalCount => itemsGrid?.Count ?? 0;
+    private int PageCount => TotalCount >= PageSize &&
+        CurrentPageNumber < itemsGrid!.PageNumbersCount ?
+        PageSize : CurrentPageCount;
+    private int CurrentPageCount => itemsGrid?.PagedView?.Count() ?? 0;
+    private int CurrentPageIndex => itemsGrid?.CurrentPage ?? 0;
+    private int CurrentPageNumber => CurrentPageIndex + 1;
+    private int CurrentPageStartIndex => CurrentPageIndex * PageSize;
+    private int CurrentPageStart => TotalCount > 0 ? CurrentPageStartIndex + 1 : 0;
+    private int CurrentPageFinish => TotalCount > 0 ? CurrentPageNumber * PageSize : 0;
+    private int CurrentPageEnd => TotalCount > CurrentPageFinish ? CurrentPageFinish : TotalCount;
+
+    private IEnumerable<ShareFileDbGroup>? GroupMembership;
+    private int FolderRecursionLimit { get; set; } = 3; //-1;
+    private string FolderToProcess { get; set; } = "allshared";
+    private string FolderToSkip { get; set; } = "";
+    //private IList<string>? FoldersToSkip { get; set; }
+    private bool IsUpdatingFoldersFromApi = false;
+    private int ItemCountTotal;
+    private int FilteredItemCount;
+    private bool isExporting = false;
+
+    private CancellationTokenSource _cts = new CancellationTokenSource();
+    private IQueryable<SfAccessControl>? _dbSfAccessControlsQuery;
+    private Dictionary<string, ShareFileDbGroup> _groups =
+        new Dictionary<string, ShareFileDbGroup>();
+    private DbPrincipal? _user { get; set; }
+
+    [Parameter] public string? UserUid { get; set; }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender)
+        {
+            var folderOptions = _options?.Value.ShareFile.Folder;
+            if (folderOptions != null)
+            {
+                FolderRecursionLimit = folderOptions.DepthLimit;
+                FolderToProcess = folderOptions.ToProcess;
+                var foldersToSkip = folderOptions.ToSkip;
+                if (foldersToSkip != null)
+                    FolderToSkip = foldersToSkip.ToEnumeratedString("&");
+            }
+        }
+    }
+
+    protected override Task OnParametersSetAsync()
+    {
+        _logger.LogDebug("Loading user access controls...");
+        if (!isRendering)
+        {
+            isRendering = true;
+            isLoading = true;
+            //VmFolders = Array.Empty<SfItemVM>();
+            //StateHasChanged(); // update the view before the next await
+            GetShareFileItems(UserUid);
+            RefreshVmFolders();
+            isLoading = false;
+            isRendering = false;
+        }
+        return Task.CompletedTask;
+    }
+
+    private void GetShareFileItems(string? userUid)
+    {
+        if (_db != null && !string.IsNullOrEmpty(userUid))
+        {
+            isLoading = true;
+            _logger.LogDebug("Loading folders from DB for {0}...", userUid);
+
+            var principalUids = new List<string> { userUid };
+            var userItemUids = _db.GetShareFilePrincipalItemAccessControls(userUid).Select(a => a.ItemId).Distinct();
+            //_logger.LogDebug("{0} user items", userItemUids.Count());
+
+            var groups = _db.GetShareFileUserGroupUids(userUid);
+            var groupUids = groups.Select(a => a.Uid).Distinct().ToList();
+            principalUids.AddRange(groupUids);
+            var groupItemUids = _db.GetShareFilePrincipalItemAccessControls(groupUids).Select(a => a.ItemId).Distinct();
+            //_logger.LogDebug("{0} group items", groupItemUids.Count());
+
+            groups.ActionEach(g => _groups.TryAdd(g.Uid, g));
+            if (groups != null)
+            {
+                int groupCount = groups.Count();
+                _logger.LogDebug("User {0} is part of {1} group(s)", userUid, groupCount);
+                if (groupCount > 0)
+                    GroupMembership = groups;
+            }
+
+            var itemUids = Queryable.Concat(userItemUids, groupItemUids);
+            ItemCountTotal = itemUids.Count();
+            _logger.LogDebug("{0} total items", ItemCountTotal);
+            _dbSfAccessControlsQuery = _db.GetShareFileAccessControls(itemUids, principalUids);
+            _user = _dbSfAccessControlsQuery.Where(a => a.PrincipalId == userUid).Select(a => a.Principal).FirstOrDefault();
+        }
+    }
+
+    private void RefreshVmFolders(IEnumerable<SfAccessControl>? sfAccessControls = null)
+    {
+        _logger.LogTrace("Refreshing the view from {0} to {1}...", CurrentPageStartIndex, PageSize);
+        if (sfAccessControls is null && _dbSfAccessControlsQuery != null)
+            sfAccessControls = _dbSfAccessControlsQuery.Skip(CurrentPageStartIndex).Take(PageSize);
+        if (sfAccessControls != null)
+        {
+            VmFolders = _mapper.Map<IEnumerable<SfItemVM>>(sfAccessControls);
+            FilteredItemCount = 0;
+            foreach (var ac in VmFolders)
+            {
+                if (_cts.IsCancellationRequested)
+                    break;
+                if (ac != null)
+                {
+                    bool isUser = ac.PrincipalUid == UserUid;
+                    ac.AccessType = isUser ? accessTypes[0] : accessTypes[1];
+                    if (!isUser && ac.PrincipalUid != null &&
+                        _groups.TryGetValue(ac.PrincipalUid, out var sfGroup))
+                        ac.AccessName = sfGroup!.Name;
+                    else if (isUser && _user != null)
+                        ac.AccessName = _user.Name;
+                    else
+                        ac.AccessName = ac.AccessType;
+                }
+                FilteredItemCount++;
+            }
+        }
+        _logger.LogDebug("{0} of {1} folders loaded", FilteredItemCount, ItemCountTotal);
+    }
+
+    private void OnSelectedAccessChange(object value)
+    {
+        if (selectedAccess != null && !selectedAccess.Any())
+            selectedAccess = null;
+    }
+
+    private async Task OnPageChanged(LoadDataArgs args)
+    {
+        _logger.LogTrace("Refreshing the page...");
+        isLoading = true;
+        var sfItems = _dbSfAccessControlsQuery?.Select(ac => ac.Item);
+        if (sfItems is IQueryable<SfItem> query)
+        {
+            await Task.Yield();
+            //SfDbItemCount = query.Count();
+            if (!string.IsNullOrEmpty(args.Filter))
+                query = query.Where(args.Filter);
+            if (!string.IsNullOrEmpty(args.OrderBy))
+                query = query.OrderBy(args.OrderBy);
+            //FilteredItemCount = query.Count();
+            if (args.Skip != null)
+                query = query.Skip(args.Skip.Value);
+            if (args.Top != null)
+                query = query.Take(args.Top.Value);
+            FilteredItemCount = query.Count();
+            VmFolders = _mapper.Map<IEnumerable<SfItemVM>>(query);
+        }
+        isLoading = false;
+        _logger.LogDebug("{0} of {1} folders loaded", FilteredItemCount, ItemCountTotal);
+    }
+
+    public async Task EnterGetApiFolders(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            await GetFoldersFromApi();
+    }
+
+    private async Task GetFoldersFromApi()
+    {
+        _logger.LogDebug("Loading values from API...");
+        IsUpdatingFoldersFromApi = true;
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+        var apiValues = await _sfService.GetShareFileApiFoldersAsync(
+            FolderToProcess, FolderToSkip, FolderRecursionLimit, _cts.Token);
+        _logger.LogInformation("API values loaded in {0}", stopwatch.Elapsed.ToLongTimeString());
+        stopwatch.Restart();
+        var sfItems = _mapper.Map<IList<SfItem>>(apiValues);
+        //await RefreshVmFolders(sfItems);
+        _logger.LogDebug("Adding values to the database...");
+        int updateCount = await _db.AddOverwriteAsync(sfItems);
+        var folderAccess = apiValues.SelectMany(f => f.AccessControls).DistinctBy(ac => ac.Id);
+        var sfAccessControls = _mapper.Map<IEnumerable<SfAccessControl>>(folderAccess);
+        sfAccessControls.ActionEach(ac => ac.Item = null);
+        sfAccessControls.ActionEach(ac => ac.Principal = null);
+        updateCount += await _db.AddOverwriteAsync(sfAccessControls);
+        stopwatch.Stop();
+        _logger.LogInformation("{0} database records updated in {1}", updateCount, stopwatch.Elapsed.ToLongTimeString());
+        IsUpdatingFoldersFromApi = false;
+        RefreshVmFolders(sfAccessControls);
+    }
+
+    private int CountTrue(SfAccessControl ac)
+    {
+        var bools = new bool?[] { ac?.CanView, ac?.CanDownload, ac?.CanUpload, ac?.CanDelete, ac?.CanManagePermissions };
+        return bools.TrueCount();
+    }
+
+    private IEnumerable<SFUserItemSecurity> GetHighestAccess(IQueryable<SfAccessControl>? sfAccessControls, CancellationToken ct = default)
+    {
+        IList<SfAccessControl> result = new List<SfAccessControl>();
+        if (sfAccessControls != null)
+        {
+            var acs = Enumerable.AsEnumerable(sfAccessControls);
+            var groupedACs = acs.GroupBy(a => a.ItemId);
+            foreach (var group in groupedACs)
+            {
+                if (ct.IsCancellationRequested)
+                    break;
+                if (group?.Count() > 1)
+                {
+                    var viewAccess = group.Where(g => g?.CanView ?? false);
+                    var userAccess = viewAccess.Where(g => g.Principal != null)?.FirstOrDefault();
+                    var maxAccess = userAccess != null ? userAccess : viewAccess.MaxBy(a => CountTrue(a));
+                    if (maxAccess != null)
+                    {
+                        if (maxAccess.Principal == null && _groups.TryGetValue(maxAccess.PrincipalId, out ShareFileDbGroup? sfGroup))
+                            maxAccess.Principal = new DbPrincipal { Uid = maxAccess.PrincipalId, Name = sfGroup!.Name };
+                        result.Add(maxAccess);
+                    }
+                }
+                else
+                {
+                    var access = group?.FirstOrDefault();
+                    if (access != null)
+                    {
+                        if (access.Principal == null && _groups.TryGetValue(access.PrincipalId, out ShareFileDbGroup? sfGroup))
+                            access.Principal = new DbPrincipal { Uid = access.PrincipalId, Name = sfGroup!.Name };
+                        result.Add(access);
+                    }
+                }
+            }
+        }
+        return _mapper.Map<IEnumerable<SFUserItemSecurity>>(result);
+    }
+    
+    private IEnumerable<SFUserItemSecurity>? PrepareDataForExport()
+    {
+        IEnumerable<SFUserItemSecurity>? itemSecurity = null;
+        if (_dbSfAccessControlsQuery != null)
+        {
+            var acs = Enumerable.AsEnumerable(_dbSfAccessControlsQuery);
+            itemSecurity = _mapper.Map<IEnumerable<SFUserItemSecurity>>(acs);
+            foreach (var ac in itemSecurity)
+            {
+                bool isUser = ac.PrincipalUid == UserUid;
+                if (!isUser && ac.PrincipalUid != null &&
+                    _groups.TryGetValue(ac.PrincipalUid, out var sfGroup))
+                    ac.PrincipalName = sfGroup!.Name;
+                else if (isUser && _user != null)
+                    ac.PrincipalName = _user.Name;
+                else
+                    ac.PrincipalName = isUser ? accessTypes[0] : accessTypes[1];
+            }
+        }
+        return itemSecurity;
+    }
+
+    public async Task ExportToExcel()
+    {
+        //var sfAccessControls = GetHighestAccess(_dbSfAccessControlsQuery, _cts.Token);
+        var sfAccessControls = PrepareDataForExport();
+        if (sfAccessControls.IsNotNullOrEmpty())
+        {
+            var name = _user?.Email?.Split('@').FirstOrDefault()?.Replace('.', '_');
+            string fileName = string.Format("User folder access report for {0}", name);
+            var hide = new int[] { 1, 2, 3, 4, 10, 11, 15 }; //Enumerable.Range(1, 4).ToArray();
+            await JS.DownloadExcelStream(sfAccessControls, fileName, hide);
+            //filePath = _sfAccessControls.WriteToExcel(_filePath, fileName, hide);
+        }
+    }
+    
+    public void Cancel()
+    {
+        _logger.LogDebug("API calls cancelled");
+        _cts?.Cancel();
+        if (!_cts?.TryReset() ?? false)
+            _cts = new CancellationTokenSource();
+    }
+
+    public void Dispose()
+    {
+        Cancel();
+        _cts?.Dispose();
+    }
+}

@@ -1,0 +1,70 @@
+﻿@page "/sf-group-member-data"
+
+<PageTitle>ShareFile Group Members</PageTitle>
+@using ShareFileWebPortal.Data.ViewModels
+@inject ILogger<SFGroupMemberData> _logger
+
+<h3>Select Group</h3>
+@if (sfGroups == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <p>@sfGroups.Count filtered "@filter" groups loaded from the database.
+        <button @onclick="GetGroupsFromApi">Refresh database groups from the ShareFile API</button>
+        <button @onclick="GetAllGroupMembersFromApi">Refresh all database groups and members from the ShareFile API</button>
+    </p>
+    
+    <select @onchange="@GroupChanged">
+        <option value="">@initialText</option>
+        @foreach (var group in sfGroups)
+        {
+            <option value="@group.Id"> @group.Name </option>
+        }
+    </select>
+}
+
+<br />
+
+<h3>ShareFile Group Members</h3>
+@if (SFGroupMembers == null)
+{
+    <p><em>Waiting for group selection.</em></p>
+}
+else
+{
+    <p>@memberCount group members loaded from the database.
+        <button @onclick="GetGroupMembersFromApi">Refresh database group members from the ShareFile API</button>
+    </p>
+
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Group ID</th>
+                <th>Member ID</th>
+                <th>Company</th>
+                <th>Name</th>
+                <th>Confirmed</th>
+                <th>Disabled</th>
+                <th>Email</th>
+                <th>URL</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var item in SFGroupMembers)
+            {
+                <tr>
+                    <td>@item.GroupUid</td>
+                    <td>@item.MemberUid</td>
+                    <td>@item.Company</td>
+                    <td>@item.FullName</td>
+                    <td>@item.IsConfirmed</td>
+                    <td>@item.IsDisabled</td>
+                    <td>@item.Email</td>
+                    <td>@item.Url</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}

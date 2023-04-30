@@ -1,0 +1,206 @@
+﻿<PageTitle>ShareFile Folder Access</PageTitle>
+
+@using System.Diagnostics
+@using System.Linq.Dynamic.Core
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.Extensions.Options
+@using Common.Helpers
+@using Common.Helpers.IO
+@using ShareFileWebPortal.Models
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using global::Data.ShareFile
+@using global::Data.ShareFile.DbFirstModels
+@using global::Data.ShareFile.Models
+@using AutoMapper
+@using ShareFile.Api.Helpers.Extensions
+@using ShareFile.Api.Helpers.Models
+
+@implements IDisposable
+@inject ILogger<SFFolderAccess> _logger
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject IOptions<AppsettingsOptions> _options
+@inject IMapper _mapper
+@inject IJSRuntime JS
+
+@if (VmFolders == null)
+{
+    @if (Group == null)
+    {
+        <p><em>Waiting for user selection.</em></p>
+    }
+    else
+    {
+        <p><em>Loading ShareFile folder access for the selected group...</em></p>
+    }
+}
+else
+{
+    @if (Group != null)
+    {
+        <p>Group GUID: @Group.Uid</p>
+    }
+
+    <h4>ShareFile Folder Access</h4>
+
+    <p>@ItemCountTotal.ToString("n0") items loaded from the database.
+        <button class="btn btn-primary" @onclick="ExportToExcel" disabled=@isExporting>Export All</button></p>
+    
+    <RadzenDataGrid @ref=itemsGrid Count="@ItemCountTotal" Data="@VmFolders" TItem="SfItemVM" IsLoading="@isLoading" LoadData="@OnPageChanged" AllowSorting="true" AllowColumnResize="true" AllowColumnReorder="true"
+        AllowFiltering="true" FilterMode="FilterMode.Advanced" LogicalFilterOperator="LogicalFilterOperator.Or" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowPaging="true" PageSize="@PageSize" PagerPosition="PagerPosition.Bottom" PagerHorizontalAlign="HorizontalAlign.Left" ShowPagingSummary="true">
+        <GroupHeaderTemplate>
+            @context.GroupDescriptor.GetTitle(): @(context.Data.Key ?? "") (@context.Data.Count)
+        </GroupHeaderTemplate>
+        <Columns>
+            <RadzenDataGridColumn TItem="SfItemVM" Property="Uid" Title="GUID" Visible="false" Filterable="false" Sortable="false" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="FullPath" Title="Folder">
+               <FooterTemplate>
+                    Displaying <b>@PageCount</b> folders from <b>@CurrentPageStart</b> to <b>@CurrentPageEnd</b> of <b>@ItemCountTotal</b>
+                </FooterTemplate>
+            </RadzenDataGridColumn>
+            <RadzenDataGridColumn TItem="SfItemVM" Property="AccessName" Title="Name" Width="150px" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="ItemCount" Title="Items" Width="110px" FormatString="{0:n0}" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="FileSize" Title="Size" Width="100px" />
+        </Columns>
+    </RadzenDataGrid>
+}
+
+@code {
+    private int PageSize = 100;
+    private RadzenDataGrid<SfItemVM>? itemsGrid;
+    protected IEnumerable<SfItemVM>? VmFolders;
+    private bool isLoading = false;
+    private int TotalCount => itemsGrid?.Count ?? 0;
+    private int PageCount => TotalCount >= PageSize && IsNotLastPage ? PageSize : CurrentPageCount;
+    private bool IsNotLastPage => CurrentPageIndex < (TotalCount / PageSize);
+    private int CurrentPageCount => itemsGrid?.PagedView?.Count() ?? 0;
+    private int CurrentPageIndex => itemsGrid?.CurrentPage ?? 0;
+    private int CurrentPageNumber => CurrentPageIndex + 1;
+    private int CurrentPageStartIndex => CurrentPageIndex * PageSize;
+    private int CurrentPageStart => TotalCount > 0 ? CurrentPageStartIndex + 1 : 0;
+    private int CurrentPageFinish => TotalCount > 0 ? CurrentPageNumber * PageSize : 0;
+    private int CurrentPageEnd => TotalCount > CurrentPageFinish ? CurrentPageFinish : TotalCount;
+    private int ItemCountTotal;
+    private int ItemCountFiltered;
+    private bool isExporting = false;
+
+    private CancellationTokenSource _cts = new CancellationTokenSource();
+    private IQueryable<SfAccessControl>? _dbSfAccessControlsQuery;
+    private IList<string> _accessTypes = new List<string> { "User", "Group" };
+    //private ShareFileFolderOptions? _sfFolder = _options?.Value.ShareFile.Folder;
+
+    [Parameter] public ShareFileGroupVM? Group { get; set; }
+
+    protected override void OnParametersSet()
+    {
+        _logger.LogDebug("Loading group access controls...");
+        isLoading = true;
+        GetShareFileItems(Group?.Uid);
+        RefreshVmFolders();
+        isLoading = false;
+    }
+
+    private void GetShareFileItems(string? groupUid)
+    {
+        if (_db != null && !string.IsNullOrEmpty(groupUid))
+        {
+            _logger.LogDebug("Loading group access controls from DB for {0}...", groupUid);
+            _dbSfAccessControlsQuery = _db.GetShareFilePrincipalAccessControls(groupUid);
+            ItemCountTotal = _dbSfAccessControlsQuery.Select(ac => ac.Item).Distinct().Count();
+            _logger.LogDebug("Group can view {0} total items", ItemCountTotal);
+        }
+    }
+
+    private void RefreshVmFolders()
+    {
+        _logger.LogTrace("Refreshing the view from {0} to {1}...", CurrentPageStartIndex, PageSize);
+        if (_dbSfAccessControlsQuery != null)
+        {
+            var sfAccessControls = _dbSfAccessControlsQuery.Skip(CurrentPageStartIndex).Take(PageSize);
+            VmFolders = _mapper.Map<IEnumerable<SfItemVM>>(sfAccessControls);
+            ItemCountFiltered = 0;
+            foreach (var ac in VmFolders)
+            {
+                if (_cts.IsCancellationRequested)
+                    break;
+                if (ac != null)
+                {
+                    ac.AccessName = Group?.Name ?? _accessTypes[1];
+                    ac.AccessType = _accessTypes[1];
+                }
+                ItemCountFiltered++;
+            }
+        }
+        _logger.LogDebug("{0} of {1} folders loaded", ItemCountFiltered, ItemCountTotal);
+    }
+
+    private async Task OnPageChanged(LoadDataArgs args)
+    {
+        _logger.LogTrace("Refreshing the page...");
+        isLoading = true;
+        var sfItems = _dbSfAccessControlsQuery?.Select(ac => ac.Item);
+        if (sfItems is IQueryable<SfItem> query)
+        {
+            await Task.Yield();
+            //SfDbItemCount = query.Count();
+            if (!string.IsNullOrEmpty(args.Filter))
+                query = query.Where(args.Filter);
+            if (!string.IsNullOrEmpty(args.OrderBy))
+                query = query.OrderBy(args.OrderBy);
+            //FilteredItemCount = query.Count();
+            if (args.Skip != null)
+                query = query.Skip(args.Skip.Value);
+            if (args.Top != null)
+                query = query.Take(args.Top.Value);
+            ItemCountFiltered = query.Count();
+            VmFolders = _mapper.Map<IEnumerable<SfItemVM>>(query);
+        }
+        isLoading = false;
+        _logger.LogDebug("{0} of {1} folders loaded", ItemCountFiltered, ItemCountTotal);
+    }
+
+    private IEnumerable<SFUserItemSecurity>? PrepareDataForExport()
+    {
+        IEnumerable<SFUserItemSecurity>? itemSecurity = null;
+        if (_dbSfAccessControlsQuery != null)
+        {
+            var acs = Enumerable.AsEnumerable(_dbSfAccessControlsQuery);
+            itemSecurity = _mapper.Map<IEnumerable<SFUserItemSecurity>>(acs);
+            foreach (var item in itemSecurity)
+                item.PrincipalName = Group?.Name ?? "";
+        }
+        return itemSecurity;
+    }
+
+    public async Task ExportToExcel()
+    {
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+        _logger.LogTrace("Preparing {0} records for export", ItemCountTotal);
+        var itemSecurity = PrepareDataForExport();
+        _logger.LogTrace("{0} records prepared in {1}",
+            ItemCountTotal, stopwatch.Elapsed.ToLongTimeString());
+        stopwatch.Reset();
+        if (itemSecurity.IsNotNullOrEmpty())
+        {
+            var name = Group?.Name?.Replace('.', '_')?.Replace(' ', '_');
+            string fileName = string.Format("Group folder access report for {0}", name);
+            var hide = new int[] { 1, 2, 3, 4, 10, 11, 15 };
+            fileName = await JS.DownloadExcelStream(itemSecurity, fileName, hide);
+            _logger.LogDebug("'{0}' downloaded in {1}",
+                fileName, stopwatch.Elapsed.ToLongTimeString());
+        }
+        stopwatch.Stop();
+    }
+
+    public void Dispose()
+    {
+        _cts?.Cancel();
+        _cts?.Dispose();
+    }
+}

@@ -1,0 +1,114 @@
+﻿@page "/sf-folder-access-user"
+
+<PageTitle>ShareFile User Folder Access</PageTitle>
+
+@using System.Diagnostics
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using Microsoft.EntityFrameworkCore
+@using AutoMapper
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using Common.Helpers
+@using Common.Helpers.IO
+@using global::Data.ShareFile
+@using global::Data.ShareFile.Models
+@using global::Data.ShareFile.DbFirstModels
+@using ShareFile.Api.Helpers.Extensions
+@using ShareFile.Api.Helpers.Models
+
+@implements IDisposable
+@inject ILogger<SFFolderAccessUser> _logger
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject IMapper _mapper
+@inject IJSRuntime JS
+
+<h3>Select User</h3>
+
+@if (VmUsers == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <RadzenDropDown Data=@VmUsers TextProperty="Name" ValueProperty="Uid" TValue="SfPrincipalVM" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowClear="true" AllowFiltering="true" Placeholder="Select a user..." Change=@(args => UserSelectionChanged(args))/>
+
+    <div class="border-primary my-1 p-1">
+        <ErrorBoundary>
+            <ChildContent>
+                <SFFolderAccess UserUid="@_selectedUid"/>
+            </ChildContent>
+            <ErrorContent>
+                <p>ShareFile Folder Access is not available at the moment, please try again later.</p>
+            </ErrorContent>
+        </ErrorBoundary>
+    </div>
+}
+
+@code {
+    private string? _selectedUid;
+    //private DbPrincipal? _principal;
+    private string SearchString { get; set; } = "";
+    private string? FilterString { get; set; }
+
+    private CancellationTokenSource cts = new CancellationTokenSource();
+    private IEnumerable<DbPrincipal>? _dbSfUsers;
+    protected ICollection<SfPrincipalVM>? VmUsers { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logger.LogDebug("Loading users from DB...");
+        _dbSfUsers = await _db.GetShareFilePrincipals(cts.Token);
+        RefreshVmUsers();
+    }
+
+    private IEnumerable<DbPrincipal>? FilterUsers()
+    {
+        FilterString = $"{SearchString}";
+        IEnumerable<DbPrincipal>? result = null;
+        if (_dbSfUsers != null)
+        {
+            _logger.LogDebug("Applying '{0}' filter to {1}", FilterString, _dbSfUsers.Count());
+            var filters = SearchString?.Split('&') ?? Array.Empty<string>();
+            var andFilters = filters.Where(f => !f.Contains('|'));
+            var orFilters = filters.Where(f => f.Contains('|')).SelectMany(f => f.Split('|'));
+            result = _dbSfUsers;
+            if (andFilters.Any())
+                result = result.Where(u => andFilters.All(a => u.Email.Contains(a,
+                    char.IsUpper(a.FirstOrDefault()) ? StringComparison.CurrentCulture : StringComparison.OrdinalIgnoreCase)));
+            if (orFilters.Any())
+                result = result.Where(u => orFilters.Any(o => u.Email.Contains(o,
+                    char.IsUpper(o.FirstOrDefault()) ? StringComparison.CurrentCulture : StringComparison.OrdinalIgnoreCase)));
+        }
+        return result;
+    }
+
+    private void RefreshVmUsers()
+    {
+        var filtered = FilterUsers();
+        if (filtered != null)
+        {
+            VmUsers = _mapper.Map<IList<SfPrincipalVM>>(filtered);
+            _logger.LogDebug("{0} users loaded", VmUsers.Count);
+        }
+    }
+
+    private void UserSelectionChanged(object? selectedValue)
+    {
+        if (selectedValue is string selectedUid)
+        {
+            _selectedUid = selectedUid;
+            var user = VmUsers?.Where(u => u.Uid == selectedUid).FirstOrDefault();
+            _logger.LogDebug($"{user?.Name} <{user?.Email}> ({selectedUid}) selected");
+        }
+    }
+
+    public void Dispose()
+    {
+        cts?.Cancel();
+        cts?.Dispose();
+    }
+}

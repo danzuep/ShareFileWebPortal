@@ -1,0 +1,60 @@
+﻿@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@inject ShareFileApiService _sfService
+@inject ILogger<SFGroupMemberDataLoad> _logger
+
+<h3>ShareFile Group Members</h3>
+<p>Child <code>group</code>: @SFGroup
+    <button @onclick="UpdateMembersFromGroup">Update members from group</button>
+</p>
+
+@if (SFGroup == null)
+{
+    <p><em>Waiting for group selection.</em></p>
+}
+else
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Member ID</th>
+                <th>Company</th>
+                <th>Name</th>
+                <th>URL</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var item in SFGroup.Members)
+            {
+                <tr>
+                    <td>@item.MemberUid</td>
+                    <td>@item.Company</td>
+                    <td>@item.FullName</td>
+                    <td>@item.Url</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    [Parameter] public ShareFileGroupVM? SFGroup { get; set; }
+
+    [Parameter] public EventCallback<ShareFileGroupVM> SFGroupChanged { get; set; }
+
+    public async Task UpdateMembersFromGroup()
+    {
+        if (SFGroup != null)
+        {
+            _logger.LogInformation($"Value changed to {SFGroup.Uid}");
+            var sfGroupMembers = await _sfService.GetGroupMembersAsync(SFGroup.Uid, SFGroup.Name);
+            if (sfGroupMembers is IEnumerable<ShareFileGroupMemberVM> sfMembers)
+            {
+                _logger.LogInformation($"{SFGroup.Name} group has {sfMembers.Count()} members.");
+                SFGroup.Members = sfMembers.ToList();
+                await SFGroupChanged.InvokeAsync(SFGroup);
+            }
+        }
+    }
+}

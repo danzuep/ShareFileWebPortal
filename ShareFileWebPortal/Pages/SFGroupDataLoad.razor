@@ -1,0 +1,144 @@
+﻿@page "/sf-group-member-data-load"
+
+<PageTitle>ShareFile Group Members</PageTitle>
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@inject ShareFileApiService _sfService
+@inject ILogger<SFGroupDataLoad> _logger
+
+<h3>Select Group</h3>
+@if (sfGroups == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <select @onchange="@UpdateMembersFromGroup">
+        <option value="">@initialText</option>
+        @foreach (var group in sfGroups)
+        {
+            <option value="@group.Uid"> @group.Name </option>
+        }
+    </select>
+}
+
+@*<h3>Select Group</h3>
+<RadzenDropDown Style="width:300px" TValue="string" AllowFiltering="true" AllowClear="true" LoadData=@LoadGroupData
+    @bind-Value=@SelectedGroupId Placeholder="Select group" Data="@(SFGroups)" TextProperty="Name" ValueProperty="GroupId"/>*@
+
+@*    <RadzenDropDown Style="width:300px" TValue="string" AllowFiltering="true" AllowClear="true" @bind-Value=@SelectedGroupId
+    Placeholder="Select group" Data="@(SFGroups)" TextProperty="Name" ValueProperty="GroupId" Change=@(args => OnChange(args, "DropDown"))/>*@
+        
+@*
+<h3>ShareFile Group Details</h3>
+<RadzenDataGrid AllowFiltering="true" AllowPaging="true" AllowSorting="true" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive" 
+            Data="@(SFGroupMembers.Where(o => o.GroupId == SelectedGroupId))" TItem="ShareFileGroupMemberVM" ColumnWidth="200px">
+    <Columns>
+        <RadzenDataGridColumn TItem="ShareFileGroupMemberVM" Property="MemberId" Title="Member ID" />
+        <RadzenDataGridColumn TItem="ShareFileGroupMemberVM" Property="Company" Title="Company" />
+        <RadzenDataGridColumn TItem="ShareFileGroupMemberVM" Property="FullName" Title="Name" />
+    </Columns>
+</RadzenDataGrid>*@
+
+<p>Parent <code>group</code>: @sfGroup</p>
+
+<SFGroupMemberDataLoad @bind-SFGroup="sfGroup" @bind-SFGroup:event="SFGroupChanged"/>
+
+
+@code {
+    //https://docs.microsoft.com/en-us/aspnet/core/blazor/components/data-binding?view=aspnetcore-6.0#bind-across-more-than-two-components
+    //https://blazor.radzen.com/get-started //https://blazor.radzen.com/dropdowns
+    private string initialText = "-- Group Selection --";
+    private ShareFileGroupVM? sfGroup;
+    private IEnumerable<ShareFileGroupVM>? sfGroups;
+    
+        //[BindProperty] string SelectedGroupId { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logger.LogInformation("Init...");
+        sfGroups = await _sfService.GetGroupsAsync();
+        //sfGroups = sfGroups.Where(g => g.Name.StartsWith("prefix")).ToList(); // folder name filter prefix
+        var groupSummary = sfGroups.Select(a => $"{a.Uid} {a.Name}");
+        _logger.LogDebug(string.Join("\r\n", groupSummary));
+        _logger.LogInformation("Done");
+    }
+
+    private Task UpdateMembersFromGroup(ChangeEventArgs e)
+    {
+        if (e.Value is string selectedGroupId)
+        {
+            _logger.LogInformation($"Value changed to {selectedGroupId}");
+            if (sfGroups != null && !string.IsNullOrWhiteSpace(selectedGroupId))
+            {
+                var filter = sfGroups.Where(g => g != null && g.Uid == selectedGroupId);
+                if (filter.Any())
+                    sfGroup = filter.First();
+            }
+        }
+        return Task.CompletedTask;
+    }
+    
+    //private Task OnChange(ChangeEventArgs e)
+    //{
+    //    if (e.Value is string selectedGroupId)
+    //    {
+    //        _logger.LogInformation($"Value changed to {selectedGroupId}");
+    //        var shareFileGroupVM = _sfService.GetGroupMembersAsync(selectedGroupId, "").GetAwaiter().GetResult();
+    //        var sfGroupMembers = shareFileGroupVM.ToList();
+    //        _logger.LogInformation($"{selectedGroupId} group has {sfGroupMembers.Count} members.");
+    //        SFGroupMembers = sfGroupMembers;
+    //        //await GroupChanged.InvokeAsync();
+    //        //_ = InvokeAsync(StateHasChanged);
+    //    }
+    //    return Task.CompletedTask;
+    //}
+
+    //[Parameter]
+    //public EventCallback<ShareFileGroupVM> GroupChanged { get; set; }
+
+    //private async Task UpdateMembersFromGroup()
+    //{
+    //    await GroupChanged.InvokeAsync();
+    //}
+
+    //void OnChange(object value, string name)
+    //{
+    //    //var str = value is IEnumerable<object> ? string.Join(", ", (IEnumerable<object>)value) : value;
+    //    //_logger.LogInformation($"{name} value changed to {str}");
+    //    //var shareFileGroupVM = _sfService.GetGroupMembersAsync(str?.ToString() ?? "", name).GetAwaiter().GetResult();
+    //    _logger.LogInformation($"{name} value changed to {SelectedGroupId}");
+    //    var shareFileGroupVM = _sfService.GetGroupMembersAsync(SelectedGroupId, name).GetAwaiter().GetResult();
+    //    SFGroupMembers = shareFileGroupVM.ToList();
+    //}
+
+    //protected void LoadGroupData()
+    //{
+    //    var groups = _sfService.GetGroupsAsync().GetAwaiter().GetResult();
+    //    if (groups.IsNotNullOrEmpty())
+    //        SFGroups = groups.ToList();
+    //    _logger.LogDebug("Group data loaded");
+    //    _ = InvokeAsync(StateHasChanged);
+    //}
+
+    //void LoadDataVirtualization(LoadDataArgs args)
+    //{
+    //    var query = dbContext.Groups.AsQueryable();
+
+    //    if (!string.IsNullOrEmpty(args.Filter))
+    //    {
+    //        query = query.Where(c => c.CustomerID.ToLower().Contains(args.Filter.ToLower()) || c.ContactName.ToLower().Contains(args.Filter.ToLower()));
+    //    }
+
+    //    _logger.LogDebug($"LoadData with virtualization: Skip:{args.Skip}, Top:{args.Top}, Filter:{args.Filter}");
+
+    //    count = query.Count();
+
+    //    SFGroupMembers = query.Skip(args.Skip.HasValue ? args.Skip.Value : 0).Take(args.Top.HasValue ? args.Top.Value : 10).ToList();
+
+    //    InvokeAsync(StateHasChanged);
+    //}
+}

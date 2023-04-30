@@ -1,0 +1,44 @@
+﻿@page "/sf-group-data"
+
+<PageTitle>ShareFile Groups</PageTitle>
+@using global::Data.ShareFile
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Services
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject ILogger<SFGroupData> _logger
+
+<h1>ShareFile Groups</h1>
+
+@if (sfGroups == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <p>@sfGroups.Count filtered "@filter" groups loaded from the database.
+        <button @onclick="GetGroupsFromApi">Refresh database groups from the ShareFile API</button>
+    </p>
+    
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Group ID</th>
+                <th>Name</th>
+                <th>Shared</th>
+                <th>UID</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var item in sfGroups)
+            {
+                <tr>
+                    <td>@item.Id</td>
+                    <td>@item.Name</td>
+                    <td>@item.IsShared</td>
+                    <td>@item.Uid</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}

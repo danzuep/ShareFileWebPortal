@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <Import Project="..\NuGetInfo.props" />
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net6.0</TargetFrameworks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AssemblyName>ShareFile.Api.Client</AssemblyName>
+    <PackageId>ShareFile.Api.Client</PackageId>
+    <PackageTags>ShareFile</PackageTags>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <NoWarn>1701;1702;1705;1591;1571;1572;1573;1570;AD0001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Internal\**\*.cs" />
+  </ItemGroup>
+
+  <PropertyGroup Condition=" '$(TargetFramework)' == 'netstandard2.0' ">
+    <DefineConstants>$(DefineConstants);ASYNC;NETFX_CORE</DefineConstants>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <PackageReference Include="FUR10N.NullContracts" Version="1.3.4">
+      <PrivateAssets>All</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="System.Buffers" Version="4.5.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+  </ItemGroup>
+
+</Project>

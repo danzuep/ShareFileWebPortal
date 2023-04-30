@@ -1,0 +1,179 @@
+﻿@page "/sf-folders-datagrid"
+
+<PageTitle>ShareFile User Folder Access</PageTitle>
+@using System.Diagnostics
+@using System.ComponentModel.DataAnnotations
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using Microsoft.AspNetCore.StaticFiles
+@using Common.Helpers
+@using Common.Helpers.IO
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using global::Data.ShareFile
+@using global::Data.ShareFile.Models
+@using ShareFile.Api.Helpers.Extensions
+@using ShareFile.Api.Helpers.Models
+@using AutoMapper
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject ILogger<SFFolders> _logger
+@inject IMapper _mapper;
+@inject IJSRuntime JS
+
+<h2>ShareFile Folders</h2>
+
+<div>
+    <label>
+        <p><button @onclick="GetFoldersFromApi">Refresh folders from the API</button>
+            Folder Depth: <input @bind="FolderRecursionLimit" @bind:event="oninput" @onkeydown="@EnterGetApiFolders" /> (-1 for unlimited recursion)
+            @if (VmFolders != null)
+            {
+                <button class="btn btn-primary" @onclick="ExportToExcel" disabled=@isExporting>Export All</button>
+            }
+        </p>
+        @if (IsUpdatingFoldersFromApi)
+        {
+            <p><button @onclick="Cancel">Stop the API call</button>
+                Updating folders from the API... This can take a LONG time</p>
+        }
+    <p>Folder to process: <input @bind="FolderToProcess" @bind:event="oninput" @onkeydown="@EnterGetApiFolders" /> (folder name or GUID)</p>
+    <p>Folder to skip: <input @bind="FolderToSkip" @bind:event="oninput" @onkeydown="@EnterGetApiFolders" /> (folder name or GUID)</p>
+    </label>
+</div>
+
+@if (VmFolders == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <RadzenDataGrid @ref=itemsGrid Data="@VmFolders" TItem="SfItemVM" Render="@OnRender"
+        AllowFiltering="true" FilterMode="FilterMode.Advanced" LogicalFilterOperator="LogicalFilterOperator.Or" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowGrouping="true" AllowSorting="true" AllowColumnResize="true" AllowColumnReorder="true"
+        AllowPaging="true" PageSize="@PageSize" PagerPosition="PagerPosition.Bottom" PagerHorizontalAlign="HorizontalAlign.Justify">
+        <GroupHeaderTemplate>
+            @context.GroupDescriptor.GetTitle(): @(context.Data.Key ?? "") (@context.Data.Count)
+        </GroupHeaderTemplate>
+        <Columns>
+            <RadzenDataGridColumn TItem="SfItemVM" Title="#" Width="40px" Sortable="false" Filterable="false" Reorderable="false" TextAlign="TextAlign.Center">
+                <Template>@GetRowCount(context)</Template>
+            </RadzenDataGridColumn>
+            <RadzenDataGridColumn TItem="SfItemVM" Property="Uid" Title="GUID" Width="130px" Filterable="false" Sortable="false" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="SemanticPath" Title="Folder Path">
+                <FooterTemplate>
+                    Displaying <b>@itemsGrid?.PageSize</b> folders from <b>@FirstRowCount</b> to <b>@LastRowCount</b> of <b>@itemsGrid?.Count</b>
+                </FooterTemplate>
+            </RadzenDataGridColumn>
+            <RadzenDataGridColumn TItem="SfItemVM" Property="Name" Title="Folder Name" Width="200px" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="ItemCount" Title="Items" Width="70px" FormatString="{0:n0}" />
+            <RadzenDataGridColumn TItem="SfItemVM" Property="FileSize" Title="Size" Width="65px" />
+        </Columns>
+    </RadzenDataGrid>
+}
+
+@code {
+    RadzenDataGrid<SfItemVM>? itemsGrid;
+    [Parameter] public IList<SfItemVM>? VmFolders { get; set; }
+    private IEnumerable<SfItem>? _dbSfItems;
+    private CancellationTokenSource cts = new CancellationTokenSource();
+    private int FolderRecursionLimit = 3; //-1;
+    private string FolderToProcess { get; set; } = "allshared"; // folder name or GUID
+    private string FolderToSkip { get; set; } = ""; // folder name or GUID
+    private bool IsUpdatingFoldersFromApi = false;
+    private int GetRowCount(SfItemVM? context) => context != null && VmFolders != null ? VmFolders.IndexOf(context) + 1 : 0;
+    private int FirstRowCount => GetRowCount(itemsGrid?.PagedView?.FirstOrDefault());
+    private int LastRowCount => GetRowCount(itemsGrid?.PagedView?.LastOrDefault());
+    private int[] pageSizes = new int[] { 100, 500, 1000 };
+    private int PageSize = 100;
+    private int CurrentPageIndex => itemsGrid?.CurrentPage ?? 0;
+    private bool isExporting = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logger.LogDebug("Loading values from DB...");
+        var dbSfItems = _db.GetTrackedShareFileItems();
+        var sfItems = dbSfItems.Skip(CurrentPageIndex * PageSize).Take(PageSize);
+        RefreshVmFolders(sfItems);
+        _dbSfItems = await _db.GetShareFileItemsAsync(dbSfItems, cts.Token);
+        RefreshVmFolders(_dbSfItems);
+    }
+
+    void OnRender(DataGridRenderEventArgs<SfItemVM> args)
+    {
+        if (args.FirstRender)
+        {
+            var group = new GroupDescriptor()
+            {
+                Title = "FolderPath",
+                Property = "SemanticPath"
+            };
+            args.Grid.Groups.Add(group);
+            StateHasChanged();
+        }
+    }
+
+    private void RefreshVmFolders(IEnumerable<SfItem>? sfItems = null)
+    {
+        if (sfItems != null)
+            VmFolders = _mapper.Map<IList<SfItemVM>>(sfItems);
+    }
+    
+    public async Task EnterGetApiFolders(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            await GetFoldersFromApi();
+    }
+
+    public void EnterRefreshView(KeyboardEventArgs e)
+    {
+        if (e.Code == "Enter" || e.Code == "NumpadEnter")
+            RefreshVmFolders(_dbSfItems);
+    }
+
+    private async Task GetFoldersFromApi()
+    {
+        _logger.LogDebug("Loading values from API...");
+        IsUpdatingFoldersFromApi = true;
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+        var apiValues = await _sfService.GetShareFileApiFoldersAsync(
+            FolderToProcess, FolderToSkip, FolderRecursionLimit, cts.Token);
+        _logger.LogInformation("API values loaded in {0}", stopwatch.Elapsed.ToLongTimeString());
+        stopwatch.Restart();
+        _dbSfItems = _mapper.Map<IEnumerable<SfItem>>(apiValues);
+        RefreshVmFolders(_dbSfItems);
+        StateHasChanged(); // update the view before the next await
+        _logger.LogDebug("Adding values to the database...");
+        int countUpdated = await _db.AddOverwriteAsync(_dbSfItems);
+        var folderAccess = apiValues.SelectMany(f => f.AccessControls);
+        var dbSfAccessControls = _mapper.Map<IEnumerable<SfAccessControl>>(folderAccess);
+        countUpdated += await _db.AddOverwriteAsync(dbSfAccessControls);
+        stopwatch.Stop();
+        _logger.LogInformation("{0} database records updated in {1}", countUpdated, stopwatch.Elapsed.ToLongTimeString());
+        //var sfAccessControls = _mapper.Map<IEnumerable<SFUserItemSecurity>>(folderAccess);
+        IsUpdatingFoldersFromApi = false;
+    }
+    
+    public async Task ExportToExcel()
+    {
+        string fileName = "ShareFile Folders";
+        var hide = new int[] { 6,7,8,9, 11,12, 16,17,18,19,20,21,22 };
+        await JS.DownloadExcelStream(_dbSfItems, fileName, hide);
+    }
+
+    public void Cancel()
+    {
+        _logger.LogDebug("API calls cancelled");
+        cts?.Cancel();
+        if (!cts?.TryReset() ?? false)
+            cts = new CancellationTokenSource();
+    }
+
+    public void Dispose()
+    {
+        Cancel();
+        cts?.Dispose();
+    }
+}

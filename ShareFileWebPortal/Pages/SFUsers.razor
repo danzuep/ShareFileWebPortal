@@ -1,0 +1,144 @@
+﻿@page "/sf-users"
+
+<PageTitle>ShareFile Users</PageTitle>
+
+@using System.Diagnostics
+@using global::Data.ShareFile.DbFirstModels
+@using ShareFileWebPortal.Data
+@using ShareFileWebPortal.Data.ViewModels
+@using ShareFileWebPortal.Services
+@using global::Data.ShareFile
+@using global::Data.ShareFile.Models
+@using Microsoft.AspNetCore.Mvc
+@using Microsoft.AspNetCore.Mvc.Rendering
+@using AutoMapper
+@using ShareFile.Api.Helpers.Extensions
+@using System.Linq.Dynamic.Core
+@inject ShareFileApiService _sfService
+@inject ShareFileRepository _db
+@inject ILogger<SFUsers> _logger
+@inject IMapper _mapper
+
+<h4>ShareFile Users</h4>
+
+@if (VM == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    @*<p>@TotalCount users loaded from the database.
+        <button @onclick="GetFromApi">Refresh users from the ShareFile API</button>
+    </p>*@
+    <p>@TotalCount users loaded from the database.</p>
+
+    <RadzenDataGrid @ref=dataGrid Count="@TotalCount" Data="@VM" TItem="SfPrincipalVM" IsLoading="@isLoading" LoadData="@OnPageChanged" AllowSorting="true" AllowColumnResize="true" AllowColumnReorder="true"
+        AllowFiltering="true" FilterMode="FilterMode.Simple" LogicalFilterOperator="LogicalFilterOperator.Or" FilterCaseSensitivity="FilterCaseSensitivity.CaseInsensitive"
+        AllowPaging="true" PageSize="@PageSize" PagerPosition="PagerPosition.Bottom" PagerHorizontalAlign="HorizontalAlign.Left" ShowPagingSummary="true">
+        <GroupHeaderTemplate>
+            @context.GroupDescriptor.GetTitle(): @(context.Data.Key ?? "") (@context.Data.Count)
+        </GroupHeaderTemplate>
+        <Columns>
+            <RadzenDataGridColumn TItem="SfPrincipalVM" Property="Name" Title="Full Name">
+               <FooterTemplate>
+                    Displaying <b>@PageCount</b> users from <b>@CurrentPageStart</b> to <b>@CurrentPageEnd</b> of <b>@TotalCount</b>
+                </FooterTemplate>
+            </RadzenDataGridColumn>
+            <RadzenDataGridColumn TItem="SfPrincipalVM" Property="Email" Title="Email" />
+            <RadzenDataGridColumn TItem="SfPrincipalVM" Property="Uid" Title="GUID" Sortable="false" />
+        </Columns>
+    </RadzenDataGrid>
+}
+
+@code {
+    private int PageSize = 100;
+    protected IEnumerable<SfPrincipalVM>? VM;
+    private RadzenDataGrid<SfPrincipalVM>? dataGrid;
+    private bool isLoading = false;
+    private int TotalCount;
+    private int FilteredCount;
+    private int PageCount => TotalCount >= PageSize && IsNotLastPage ? PageSize : CurrentPageCount;
+    private bool IsNotLastPage => CurrentPageIndex < (TotalCount / PageSize);
+    private int CurrentPageCount => dataGrid?.PagedView?.Count() ?? 0;
+    private int CurrentPageIndex => dataGrid?.CurrentPage ?? 0;
+    private int CurrentPageNumber => CurrentPageIndex + 1;
+    private int CurrentPageStartIndex => CurrentPageIndex * PageSize;
+    private int CurrentPageStart => TotalCount > 0 ? CurrentPageStartIndex + 1 : 0;
+    private int CurrentPageFinish => TotalCount > 0 ? CurrentPageNumber * PageSize : 0;
+    private int CurrentPageEnd => TotalCount > CurrentPageFinish ? CurrentPageFinish : TotalCount;
+    private CancellationTokenSource _cts = new CancellationTokenSource();
+    private IQueryable<DbPrincipal>? _dbQuery;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _logger.LogDebug("Loading users from DB...");
+        isLoading = true;
+        _dbQuery = _db.GetShareFilePrincipals();
+        TotalCount = _dbQuery.Count();
+        RefreshVM();
+        isLoading = false;
+    }
+
+    private void RefreshVM()
+    {
+        if (_dbQuery != null)
+        {
+            _logger.LogTrace("Refreshing the view from {0} to {1}...", CurrentPageStartIndex, PageSize);
+            VM = _mapper.Map<IEnumerable<SfPrincipalVM>>(_dbQuery.Take(PageSize));
+            FilteredCount = VM.Count();
+            _logger.LogDebug("{0} of {1} users loaded", FilteredCount, TotalCount);
+        }
+    }
+    
+    private void RefreshVM(IEnumerable<DbPrincipal>? dbPrincipals = null)
+    {
+        if (dbPrincipals != null)
+        {
+            VM = _mapper.Map<IEnumerable<SfPrincipalVM>>(dbPrincipals);
+            FilteredCount = VM.Count();
+            _logger.LogDebug("{0} users displayed", FilteredCount);
+        }
+    }
+    
+    private async Task OnPageChanged(LoadDataArgs args)
+    {
+        _logger.LogTrace("Refreshing the page...");
+        isLoading = true;
+        if (_dbQuery is IQueryable<DbPrincipal> query)
+        {
+            await Task.Yield();
+            if (!string.IsNullOrEmpty(args.Filter))
+                query = query.Where(args.Filter);
+            if (!string.IsNullOrEmpty(args.OrderBy))
+                query = query.OrderBy(args.OrderBy);
+            //FilteredCount = query.Count();
+            if (args.Skip != null)
+                query = query.Skip(args.Skip.Value);
+            if (args.Top != null)
+                query = query.Take(args.Top.Value);
+            FilteredCount = query.Count();
+            VM = _mapper.Map<IEnumerable<SfPrincipalVM>>(query);
+        }
+        isLoading = false;
+        _logger.LogDebug("{0} of {1} users loaded", FilteredCount, TotalCount);
+    }
+
+    private async Task GetFromApi()
+    {
+        _logger.LogDebug("Loading values from API...");
+        var stopwatch = new Stopwatch();
+        stopwatch.Start();
+        var apiValues = await _sfService.GetShareFileApiContactsAsync();
+        _logger.LogDebug("{0} values loaded in {1}ms", apiValues.count, stopwatch.ElapsedMilliseconds);
+        stopwatch.Restart();
+        var dbValues = _mapper.Map<IEnumerable<DbPrincipal>>(apiValues.GetValues());
+        RefreshVM(dbValues);
+        _logger.LogDebug("View-Model updated in {0}ms", stopwatch.ElapsedMilliseconds);
+        StateHasChanged();
+        stopwatch.Restart();
+        _logger.LogDebug("Saving to the database...");
+        int updateCount = await _db.AddOverwriteAsync(dbValues);
+        stopwatch.Stop();
+        _logger.LogDebug("{0} database records updated in {1}ms", FilteredCount, stopwatch.ElapsedMilliseconds);
+    }
+}
