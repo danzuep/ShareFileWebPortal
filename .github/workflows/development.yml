@@ -1,0 +1,21 @@
+name: Development
+
+on:
+  workflow_dispatch:
+    push:
+      branches:
+        - main
+
+# Cancel any other running workflows with the same ID
+concurrency:
+  group: ci-development-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: 🪜 CI/CD
+    uses: ./.github/workflows/_pipeline.yml
+    with:
+      environment: development
+      project-name: ShareFileWebPortal
+    secrets: inherit

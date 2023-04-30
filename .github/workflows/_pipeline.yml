@@ -1,0 +1,23 @@
+name: Pipeline Template
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'GitHub environment'
+        default: development
+        type: string
+      project-name:
+        description: 'Name of the project'
+        required: true
+        type: string
+
+# https://docs.github.com/en/actions/using-workflows/reusing-workflows
+jobs:
+  build:
+    uses: ./.github/workflows/_build-test.yml
+    with:
+      environment: ${{ inputs.environment }}
+      project-name: ${{ inputs.project-name }}
+      configuration: Debug
+    secrets: inherit
